@@ -1,0 +1,143 @@
+name: Build config_watcher for Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [arm64-v8a, armeabi-v7a]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        run: |
+          mkdir -p android-ndk
+          cd android-ndk
+          wget -q https://dl.google.com/android/repository/android-ndk-r27b-linux.zip
+          unzip -q android-ndk-r27b-linux.zip
+          echo "NDK_PATH=$(pwd)/android-ndk-r27b" >> $GITHUB_ENV
+
+      - name: Create optimized config_watcher.c
+        run: |
+          cat << 'EOF' > config_watcher.c
+          #include "x-watcher.h"
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include <signal.h>
+          #include <sys/stat.h>
+
+          #define SIGNAL_FILE "/data/adb/copg_config_updated"
+
+          static volatile sig_atomic_t keep_running = 1;
+
+          void signal_handler(int sig) {
+              keep_running = 0;
+          }
+
+          void config_changed_callback(XWATCHER_FILE_EVENT event, const char *path, int context, void *additional_data) {
+              if (event == XWATCHER_FILE_MODIFIED || event == XWATCHER_FILE_CREATED) {
+                  FILE *fp = fopen(SIGNAL_FILE, "w");
+                  if (fp) {
+                      fputc('1', fp);
+                      fclose(fp);
+                      chmod(SIGNAL_FILE, 0644);
+                      sync();
+                      printf("Config file %s modified, signaled shell script\n", path);
+                  } else {
+                      fprintf(stderr, "Failed to write to signal file: %s\n", strerror(errno));
+                  }
+              }
+          }
+
+          int main() {
+              signal(SIGINT, signal_handler);
+              signal(SIGTERM, signal_handler);
+
+              x_watcher *watcher = xWatcher_create();
+              if (!watcher) {
+                  fprintf(stderr, "Failed to create watcher\n");
+                  return 1;
+              }
+
+              xWatcher_reference config_ref = {
+                  .path = "/data/adb/modules/COPG/config.json",
+                  .callback_func = config_changed_callback,
+                  .context = 1,
+                  .additional_data = NULL
+              };
+
+              if (!xWatcher_appendFile(watcher, &config_ref)) {
+                  fprintf(stderr, "Failed to add watcher for config.json\n");
+                  xWatcher_destroy(watcher);
+                  return 1;
+              }
+
+              printf("Monitoring %s for changes...\n", config_ref.path);
+              if (!xWatcher_start(watcher)) {
+                  fprintf(stderr, "Failed to start watcher\n");
+                  xWatcher_destroy(watcher);
+                  return 1;
+              }
+
+              while (keep_running) {
+                  pause();
+              }
+
+              printf("Shutting down gracefully...\n");
+              xWatcher_destroy(watcher);
+              return 0;
+          }
+          EOF
+
+      - name: Create necessary header files
+        run: |
+          if [ ! -f "x-watcher.h" ]; then
+            touch x-watcher.h
+          fi
+          if [ ! -f "array.h" ]; then
+            touch array.h
+          fi
+
+      - name: Build for ${{ matrix.arch }}
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64-v8a" ]; then
+            TARGET="aarch64-linux-android"
+            SYSROOT_LIB="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/21"
+          else
+            TARGET="armv7a-linux-androideabi"
+            SYSROOT_LIB="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/21"
+          fi
+
+          CC="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}21-clang"
+          STRIP="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+
+          CFLAGS="-static -Os -flto -DNDEBUG -I$NDK_PATH/sysroot/usr/include"
+          LDFLAGS="-static -Os -flto -s -L$SYSROOT_LIB -llog -pthread"
+
+          $CC $CFLAGS -c config_watcher.c -o config_watcher.o
+          $CC config_watcher.o $LDFLAGS -o config_watcher
+          
+          $STRIP --strip-all config_watcher
+          
+          
+          mkdir -p output/${{ matrix.arch }}
+          mv config_watcher output/${{ matrix.arch }}/
+          
+          file output/${{ matrix.arch }}/config_watcher
+          ls -la output/${{ matrix.arch }}/config_watcher
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: config_watcher-${{ matrix.arch }}
+          path: output/${{ matrix.arch }}/config_watcher
