@@ -112,21 +112,43 @@ jobs:
         run: |
           if [ "${{ matrix.arch }}" = "arm64-v8a" ]; then
           TARGET="aarch64-linux-android"
+          SYSROOT_LIB="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/21"
           else
           TARGET="armv7a-linux-androideabi"
+          SYSROOT_LIB="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/21"
           fi
 
           CC="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}21-clang"
           STRIP="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-          SYSROOT="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          CFLAGS="-static -Os -flto -DNDEBUG --sysroot=$SYSROOT -I$SYSROOT/usr/include"
-          LDFLAGS="-static -Os -flto -s --sysroot=$SYSROOT -llog -pthread"   
+          LOG_LIB_PATH=$(find $NDK_PATH -name "liblog.so" | grep ${TARGET} | head -1)
+          if [ -z "$LOG_LIB_PATH" ]; then
+          echo "Error: Cannot find liblog.so for $TARGET"
+          exit 1
+          fi
+          LOG_LIB_DIR=$(dirname $LOG_LIB_PATH)
+
+          # فلگ‌های بهینه‌سازی - حذف -static برای لینک داینامیک
+          CFLAGS="-Os -flto -DNDEBUG -I$NDK_PATH/sysroot/usr/include"
+          LDFLAGS="-Os -flto -s -L$LOG_LIB_DIR -llog -pthread"
+
+          echo "Building for ${{ matrix.arch }}"
+          echo "Using log library from: $LOG_LIB_PATH"
+    
+          # کامپایل
           $CC $CFLAGS -c config_watcher.c -o config_watcher.o
           $CC config_watcher.o $LDFLAGS -o config_watcher
+    
+          # استریپ کردن برای کاهش حجم
           $STRIP --strip-all config_watcher
+    
+          # ایجاد پوشه خروجی
           mkdir -p output/${{ matrix.arch }}
           mv config_watcher output/${{ matrix.arch }}/
+    
+          # بررسی اطلاعات باینری
+          echo "Binary info:"
           file output/${{ matrix.arch }}/config_watcher
+          echo "Binary size:"
           ls -la output/${{ matrix.arch }}/config_watcher
 
       - name: Upload artifacts
